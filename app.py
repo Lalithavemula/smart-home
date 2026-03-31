@@ -5,6 +5,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 import io
+import os
+from dotenv import load_dotenv
+import requests
+
+# Load API key from .env file (NOT hardcoded!)
+load_dotenv()
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
 # Page config
 st.set_page_config(page_title="Smart Home Energy AI", layout="wide")
@@ -16,11 +23,54 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Function to query Groq API
+def query_groq(prompt):
+    """Query Groq API for AI insights"""
+    if not GROQ_API_KEY or GROQ_API_KEY == "your_groq_api_key_here":
+        return "⚠️ Please add your Groq API key to the .env file"
+    
+    try:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "llama3-70b-8192",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are an energy efficiency expert. Provide concise, actionable advice."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 500
+        }
+        
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+        else:
+            return f"API Error: {response.status_code}"
+            
+    except Exception as e:
+        return f"Error: {str(e)}"
+
 # Title
 st.title("🏠 Smart Home Energy AI")
 st.markdown("---")
 
-# File upload - Now accepts CSV as well
+# File upload
 uploaded_file = st.file_uploader("Upload Energy Consumption File", type=['xlsx', 'xls', 'csv'])
 
 if uploaded_file:
@@ -35,7 +85,6 @@ if uploaded_file:
     # Check if consumption column exists
     if 'consumption' not in df.columns:
         st.error("❌ File must contain a 'consumption' column")
-        st.info("Please ensure your file has a column named 'consumption' with energy usage data")
         st.stop()
     
     # Add timestamp if not present
@@ -55,7 +104,7 @@ if uploaded_file:
     efficiency = min(100, max(0, (1 - df['consumption'].std()/df['consumption'].mean()) * 100))
     
     # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Input Data", "📈 Analysis", "📉 Forecast", "💡 Recommendations"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Input Data", "📈 Analysis", "📉 Forecast", "💡 AI Recommendations"])
     
     with tab1:
         st.subheader("Raw Energy Data")
@@ -65,12 +114,10 @@ if uploaded_file:
         with col2:
             st.metric("Total Records", len(df))
             st.metric("Date Range", f"{df['timestamp'].min().date()} to {df['timestamp'].max().date()}")
-            st.metric("Consumption Column", "✅ Found")
     
     with tab2:
         col1, col2 = st.columns(2)
         with col1:
-            # Bar chart - Hourly pattern
             hourly_pattern = df.groupby('hour')['consumption'].mean().reset_index()
             fig1 = px.bar(hourly_pattern, x='hour', y='consumption', 
                          title='Average Consumption by Hour', 
@@ -78,21 +125,17 @@ if uploaded_file:
                          color_continuous_scale='Viridis')
             st.plotly_chart(fig1, use_container_width=True)
             
-            # Metrics row
             colm1, colm2, colm3 = st.columns(3)
             colm1.metric("Total kWh", f"{total_kwh:.0f}")
             colm2.metric("Avg kWh", f"{avg_kwh:.1f}")
             colm3.metric("Peak kWh", f"{peak_kwh:.1f} @ {peak_hour}:00")
         
         with col2:
-            # Pie chart - Day distribution
             day_dist = df.groupby('day')['consumption'].sum().reset_index()
             fig2 = px.pie(day_dist, values='consumption', names='day', 
-                         title='Energy Distribution by Day',
-                         color_discrete_sequence=px.colors.sequential.RdBu)
+                         title='Energy Distribution by Day')
             st.plotly_chart(fig2, use_container_width=True)
             
-            # Gauge for efficiency
             fig3 = go.Figure(go.Indicator(
                 mode="gauge+number",
                 value=efficiency,
@@ -113,143 +156,50 @@ if uploaded_file:
     with tab3:
         col1, col2 = st.columns(2)
         with col1:
-            # Simple forecast using moving average
             df['forecast_12h'] = df['consumption'].rolling(12, min_periods=1).mean()
-            df['forecast_24h'] = df['consumption'].rolling(24, min_periods=1).mean()
             
             fig4 = go.Figure()
             fig4.add_trace(go.Scatter(x=df['timestamp'][:72], y=df['consumption'][:72], 
                                      name='Actual', mode='lines', line=dict(color='blue')))
             fig4.add_trace(go.Scatter(x=df['timestamp'][:72], y=df['forecast_12h'][:72], 
-                                     name='12h Forecast', line=dict(dash='dash', color='orange')))
-            fig4.update_layout(title='Energy Consumption Forecast (3 Days)',
-                              xaxis_title='Timestamp',
-                              yaxis_title='kWh')
+                                     name='Forecast', line=dict(dash='dash', color='orange')))
+            fig4.update_layout(title='Energy Consumption Forecast (3 Days)')
             st.plotly_chart(fig4, use_container_width=True)
         
         with col2:
             st.subheader("Forecast Summary")
             next_12h_avg = df['forecast_12h'].iloc[-12:].mean() if len(df) >= 12 else avg_kwh
-            next_24h_avg = df['forecast_24h'].iloc[-24:].mean() if len(df) >= 24 else avg_kwh
-            
-            st.metric("Next 12h Average", f"{next_12h_avg:.1f} kWh", 
-                     delta=f"{((next_12h_avg/avg_kwh)-1)*100:.1f}%")
-            st.metric("Next 24h Average", f"{next_24h_avg:.1f} kWh",
-                     delta=f"{((next_24h_avg/avg_kwh)-1)*100:.1f}%")
-            
-            # Peak prediction
-            st.write("**Top 3 Predicted Peak Times:**")
-            peak_predictions = df.nlargest(3, 'forecast_24h')[['timestamp', 'forecast_24h']]
-            peak_predictions.columns = ['Time', 'Predicted kWh']
-            st.dataframe(peak_predictions, use_container_width=True)
+            st.metric("Next 12h Average", f"{next_12h_avg:.1f} kWh")
     
     with tab4:
-        st.subheader("💡 Energy Efficiency Recommendations")
+        st.subheader("🤖 AI-Powered Energy Insights")
+        
+        data_summary = f"Total: {total_kwh:.0f} kWh, Avg: {avg_kwh:.1f} kWh, Peak: {peak_kwh:.1f} kWh, Efficiency: {efficiency:.0f}%"
         
         col1, col2 = st.columns(2)
         
         with col1:
-            st.markdown("### 📊 Performance Metrics")
-            st.metric("Efficiency Score", f"{efficiency:.0f}%")
-            
-            # Calculate potential savings
-            if peak_kwh > avg_kwh * 1.3:
-                savings_potential = (peak_kwh - avg_kwh) * 0.15 * 30
-                st.success(f"**💰 Potential Monthly Savings:** ${savings_potential:.2f}")
-            
-            # Carbon footprint
-            carbon = total_kwh * 0.404  # kg CO2 per kWh (US average)
-            st.info(f"**🌍 Carbon Footprint:** {carbon:.0f} kg CO2")
+            if st.button("⚡ Get Efficiency Tips", use_container_width=True):
+                with st.spinner("Generating recommendations..."):
+                    response = query_groq(f"Based on: {data_summary}. Give 5 energy saving tips.")
+                    st.info(response)
         
         with col2:
-            st.markdown("### ⚡ Quick Recommendations")
-            
-            recommendations = []
-            
-            # Analyze patterns and generate recommendations
-            if peak_hour in [17, 18, 19, 20]:
-                recommendations.append("🏠 Shift high-energy activities away from evening peak hours (5-8 PM)")
-            
-            night_avg = df[df['hour'].between(23, 5)]['consumption'].mean() if len(df[df['hour'].between(23, 5)]) > 0 else 0
-            if night_avg > avg_kwh * 0.7:
-                recommendations.append("🌙 High night consumption detected - check for vampire devices and standby power")
-            
-            if df['consumption'].std() / df['consumption'].mean() > 0.5:
-                recommendations.append("📊 High consumption variability - consider scheduling regular appliance usage")
-            
-            recommendations.extend([
-                "💡 Replace traditional bulbs with LED alternatives (saves 75% energy)",
-                "🔌 Use smart power strips for entertainment systems",
-                "🌡️ Optimize thermostat settings by 2°F for heating/cooling",
-                "📱 Enable power-saving modes on all devices"
-            ])
-            
-            for i, rec in enumerate(recommendations[:5]):
-                st.write(f"{i+1}. {rec}")
-        
-        st.markdown("---")
-        st.subheader("📌 Key Conclusions & Action Items")
-        
-        colc1, colc2, colc3 = st.columns(3)
-        
-        peak_reduction = ((peak_kwh - avg_kwh) / peak_kwh * 100) if peak_kwh > 0 else 0
-        with colc1:
-            st.info(f"**🎯 Peak Reduction Target:** {peak_reduction:.0f}%")
-            st.write("Shift 20% of peak usage to off-peak hours")
-        
-        with colc2:
-            estimated_savings = (peak_kwh - avg_kwh) * 0.15 * 30 if peak_kwh > avg_kwh else 0
-            st.info(f"**💰 Estimated Monthly Savings:** ${max(0, estimated_savings):.0f}")
-            st.write("Based on $0.15/kWh average rate")
-        
-        with colc3:
-            st.info(f"**📈 Efficiency Grade:** {'A' if efficiency > 80 else 'B' if efficiency > 60 else 'C'}")
-            st.write(f"Score: {efficiency:.0f}/100")
+            if st.button("💰 Cost Savings Analysis", use_container_width=True):
+                with st.spinner("Analyzing savings..."):
+                    response = query_groq(f"Based on: {data_summary}. Calculate potential savings.")
+                    st.success(response)
 
 else:
     st.info("👆 Upload your Excel or CSV file to start analysis")
     
-    st.markdown("### 📋 Required File Format:")
-    col1, col2 = st.columns(2)
+    sample = pd.DataFrame({
+        'timestamp': pd.date_range('2024-01-01', periods=24, freq='H'),
+        'consumption': np.random.uniform(2, 8, 24).round(2)
+    })
     
-    with col1:
-        st.markdown("""
-        **Your file must have:**
-        - A column named `consumption` (energy usage in kWh)
-        - Optional: `timestamp` column (if missing, will be auto-generated)
-        
-        **Supported formats:**
-        - Excel (.xlsx, .xls)
-        - CSV (.csv)
-        """)
+    st.write("**Sample data format:**")
+    st.dataframe(sample.head(8), use_container_width=True)
     
-    with col2:
-        # Create sample template
-        sample = pd.DataFrame({
-            'timestamp': pd.date_range('2024-01-01', periods=24, freq='H'),
-            'consumption': np.random.uniform(2, 8, 24).round(2)
-        })
-        st.write("**Sample data format:**")
-        st.dataframe(sample.head(8), use_container_width=True)
-        
-        # Download button for template
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            sample.to_excel(writer, index=False)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                label="📥 Download Excel Template",
-                data=output.getvalue(),
-                file_name="energy_template.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-        with col2:
-            csv_output = sample.to_csv(index=False)
-            st.download_button(
-                label="📥 Download CSV Template",
-                data=csv_output,
-                file_name="energy_template.csv",
-                mime="text/csv"
-            )
+    csv_output = sample.to_csv(index=False)
+    st.download_button("📥 Download CSV Template", csv_output, "energy_template.csv", "text/csv")
